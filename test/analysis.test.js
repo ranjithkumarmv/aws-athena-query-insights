@@ -45,17 +45,22 @@ test("parseFilters validates input", () => {
 
 test("overview: KPIs, zero-filled daily series, breakdowns, previous period", () => {
     const { analysis } = seed();
-    const o = analysis.overview(filters("from=2026-10-06T00:00:00.000Z&to=2026-10-16T00:00:00.000Z"), 5);
-    assert.equal(o.kpis.queries, 50); // seeded days 5-9 (Oct 6-10)
+    // Oct 6-11 holds seeded days 5-9; its previous window Oct 1-6 holds days 0-4.
+    const o = analysis.overview(filters("from=2026-10-06T00:00:00.000Z&to=2026-10-11T00:00:00.000Z"), 5);
+    assert.equal(o.kpis.queries, 50);
     assert.equal(o.kpis.failed, 10);
     assert.equal(o.kpis.fail_pct, 20);
-    assert.equal(o.series.granularity, "day");
-    assert.equal(o.series.buckets.length, 10); // 10 days requested, 5 empty
-    assert.equal(o.series.buckets.at(-1).queries, 0);
-    assert.equal(o.previous.queries, 50); // days 0-4
-    const sales = o.byDatabase.find(r => r.name === "sales");
-    assert.ok(sales.cost_usd > 0);
+    assert.equal(o.previous.queries, 50);
+    assert.ok(o.byDatabase.find(r => r.name === "sales").cost_usd > 0);
     assert.ok(o.kpis.p95_ms >= o.kpis.p50_ms);
+
+    // Days with no queries are still returned, as zeros.
+    const wide = analysis.overview(filters("from=2026-10-06T00:00:00.000Z&to=2026-10-16T00:00:00.000Z"), 5);
+    assert.equal(wide.series.granularity, "day");
+    assert.equal(wide.series.buckets.length, 10);
+    assert.equal(wide.series.buckets.at(-1).queries, 0);
+    // Its previous window starts before the stored history, so no deltas.
+    assert.equal(wide.previous, null);
 });
 
 test("hourly buckets for short ranges, shifted to the viewer's time zone", () => {

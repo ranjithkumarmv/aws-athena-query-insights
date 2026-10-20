@@ -159,6 +159,36 @@ function withAlpha(hex, alpha) {
 
 const darkQuery = matchMedia("(prefers-color-scheme: dark)");
 
+/* ───────────── theme: system / light / dark ───────────── */
+
+const THEME_KEY = "aqi-theme";
+const THEMES = [
+    { key: "light", label: "Light", icon: '<circle cx="10" cy="10" r="3.5"/><path d="M10 1.5v2.2M10 16.3v2.2M1.5 10h2.2M16.3 10h2.2M4 4l1.6 1.6M14.4 14.4 16 16M4 16l1.6-1.6M14.4 5.6 16 4"/>' },
+    { key: "system", label: "System", icon: '<rect x="2.5" y="3.5" width="15" height="10" rx="1.5"/><path d="M7 17h6M10 13.5V17"/>' },
+    { key: "dark", label: "Dark", icon: '<path d="M16.5 12.2A7 7 0 0 1 7.8 3.5a7 7 0 1 0 8.7 8.7Z"/>' },
+];
+
+function savedTheme() {
+    try {
+        const t = localStorage.getItem(THEME_KEY);
+        return t === "light" || t === "dark" ? t : "system";
+    } catch {
+        return "system";
+    }
+}
+
+function applyTheme(theme) {
+    if (theme === "system") delete document.documentElement.dataset.theme;
+    else document.documentElement.dataset.theme = theme;
+    try {
+        if (theme === "system") localStorage.removeItem(THEME_KEY);
+        else localStorage.setItem(THEME_KEY, theme);
+    } catch {
+        /* storage blocked: the choice lasts for this page only */
+    }
+    window.dispatchEvent(new Event("aqi-theme"));
+}
+
 const FORMATTERS = { usd: fmt.usd, int: fmt.int, ms: fmt.ms, bytes: fmt.bytes, pct: fmt.pct };
 const AXIS_FORMATTERS = {
     usd: v => (v >= 1000 ? "$" + fmt.compact(v) : "$" + (v < 1 && v > 0 ? v.toFixed(2) : Math.round(v * 100) / 100)),
@@ -210,9 +240,11 @@ const ChartCard = {
         this.draw();
         this.onTheme = () => this.draw();
         darkQuery.addEventListener("change", this.onTheme);
+        window.addEventListener("aqi-theme", this.onTheme);
     },
     unmounted() {
         darkQuery.removeEventListener("change", this.onTheme);
+        window.removeEventListener("aqi-theme", this.onTheme);
         this.chart?.destroy();
     },
     methods: {
@@ -339,7 +371,7 @@ const PhaseBars = {
     },
 };
 
-const LoadingState = { template: "#tpl-loading", props: { loading: Boolean, error: String } };
+const LoadingState = { template: "#tpl-loading", props: { loading: Boolean, error: String, first: Boolean } };
 
 /** Shared behaviour for analysis pages: load `endpoint` whenever the filter query changes. */
 const analysisPage = endpoint => ({
@@ -444,6 +476,15 @@ const QueryPage = {
             }
         },
     },
+};
+
+const PAGE_INFO = {
+    overview: { title: "Overview", description: "Spend, volume, failures and latency across your Athena workgroups." },
+    expensive: { title: "Expensive queries", description: "Where the data-scanned bill comes from, grouped by query shape." },
+    slow: { title: "Slow queries", description: "Queue and engine time, and the queries that use the most of it." },
+    failures: { title: "Failures", description: "What failed, how often, and the error behind it." },
+    query: { title: "Query detail", description: "One execution and every stored run of the same SQL." },
+    data: { title: "Data & settings", description: "Fetch query history from AWS and choose what to collect." },
 };
 
 const SOURCE_LABELS = { default: "default", "aws-env": "AWS env", file: "config file", ui: "saved", env: "env var", cli: "CLI flag" };
@@ -623,6 +664,9 @@ createApp({
         dims: DIMS,
         filterOptions: {},
         hasData: true,
+        meta: {},
+        theme: savedTheme(),
+        themes: THEMES,
         tabs: [
             { page: "overview", label: "Overview" },
             { page: "expensive", label: "Expensive" },
@@ -638,6 +682,12 @@ createApp({
             const q = filterQueryString(this.route.params);
             return q ? "?" + q : "";
         },
+        pageInfo() {
+            return PAGE_INFO[this.route.page];
+        },
+        activeRange() {
+            return RANGES.some(r => r.key === this.route.params.range) ? this.route.params.range : "7d";
+        },
         hasDimFilter() {
             return DIMS.some(d => this.route.params[d.key]);
         },
@@ -645,12 +695,17 @@ createApp({
     async mounted() {
         listenFetchEvents();
         fetchState.listeners.add(e => e.type === "end" && this.loadFilterOptions());
+        api("/api/meta").then(m => (this.meta = m)).catch(() => {});
         await this.loadFilterOptions();
     },
     methods: {
         async loadFilterOptions() {
             this.filterOptions = await api("/api/filters");
             this.hasData = (this.filterOptions.range?.queries ?? 0) > 0;
+        },
+        setTheme(theme) {
+            this.theme = theme;
+            applyTheme(theme);
         },
         go(page) {
             location.hash = "#/" + page;

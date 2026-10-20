@@ -48,7 +48,7 @@ test("settings save from the UI, env-locked keys are refused", () =>
 
 test("analysis routes answer on an empty store and validate filters", () =>
     withServer(async base => {
-        for (const page of ["filters", "overview", "expensive", "slow", "failures"]) {
+        for (const page of ["meta", "filters", "overview", "expensive", "slow", "failures"]) {
             assert.equal((await fetch(`${base}/api/${page}?tz=60`)).status, 200, page);
         }
         assert.equal((await fetch(base + "/api/overview?from=bad")).status, 400);

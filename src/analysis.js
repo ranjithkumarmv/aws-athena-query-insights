@@ -221,11 +221,18 @@ export class Analysis {
         return labels.map((label, i) => ({ label, queries: rows.find(r => r.bucket === i)?.queries ?? 0, billable_bytes: rows.find(r => r.bucket === i)?.billable_bytes ?? 0 }));
     }
 
-    /** Same-length window just before `from`, for deltas. */
+    /**
+     * Same-length window just before `from`, for deltas. Null when stored
+     * history doesn't cover that whole window: a partial baseline gives
+     * meaningless percentages.
+     */
     previous(f) {
         if (!f.from || !f.to) return null;
         const len = Date.parse(f.to) - Date.parse(f.from);
-        return { ...f, from: new Date(Date.parse(f.from) - len).toISOString(), to: f.from };
+        const prevFrom = Date.parse(f.from) - len;
+        const first = this.get("SELECT MIN(submitted_at) AS first_at FROM queries", []).first_at;
+        if (!first || Date.parse(first) > prevFrom) return null;
+        return { ...f, from: new Date(prevFrom).toISOString(), to: f.from };
     }
 
     overview(f, price) {

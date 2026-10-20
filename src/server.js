@@ -16,6 +16,7 @@ const VENDOR = {
     // chart.js only exports its ESM/CJS entry points; the UMD build sits next to them.
     "/vendor/chart.js": join(dirname(require.resolve("chart.js")), "chart.umd.js"),
 };
+const PKG = require("../package.json");
 const TYPES = { ".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8", ".svg": "image/svg+xml" };
 
 /**
@@ -50,6 +51,7 @@ export function createApp(ctx) {
             store.saveSettings(values);
             return routes["GET /api/config"]();
         },
+        "GET /api/meta": () => ({ version: PKG.version, name: PKG.name }),
         "GET /api/aws/profiles": () => ({ profiles: listProfiles(ctx.env) }),
         "GET /api/aws/workgroups": async (req, url) => {
             const c = config().values;

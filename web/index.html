@@ -5,42 +5,75 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Athena Query Insights</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 16 16%22%3E%3Crect x=%221%22 y=%228%22 width=%223%22 height=%227%22 fill=%22%232a78d6%22/%3E%3Crect x=%226%22 y=%224%22 width=%223%22 height=%2211%22 fill=%22%232a78d6%22/%3E%3Crect x=%2211%22 y=%221%22 width=%223%22 height=%2214%22 fill=%22%232a78d6%22/%3E%3C/svg%3E">
+<script>
+  try { var t = localStorage.getItem("aqi-theme"); if (t === "light" || t === "dark") document.documentElement.dataset.theme = t; } catch (e) {}
+</script>
 <link rel="stylesheet" href="/style.css">
 </head>
 <body>
 <div id="app" v-cloak>
   <header class="top">
-    <div class="brand">
-      <h1><a href="#/overview">Athena Query Insights</a></h1>
-      <span v-if="fetchState.running" class="pill running" @click="go('data')">
-        <span class="spinner" aria-hidden="true"></span> Fetching {{ fetchState.percent.toFixed(0) }}%
-      </span>
+    <div class="top-inner">
+      <a class="brand" href="#/overview" aria-label="Athena Query Insights, overview">
+        <svg class="logo" viewBox="0 0 28 28" aria-hidden="true">
+          <rect width="28" height="28" rx="7" class="logo-bg"/>
+          <rect x="7" y="14" width="3.5" height="7" rx="1.5" class="logo-bar"/>
+          <rect x="12.25" y="10" width="3.5" height="11" rx="1.5" class="logo-bar"/>
+          <rect x="17.5" y="6.5" width="3.5" height="14.5" rx="1.5" class="logo-bar"/>
+        </svg>
+        <span class="brand-text"><b>Athena</b> Query Insights</span>
+      </a>
+      <nav class="tabs" aria-label="Pages">
+        <a v-for="t in tabs" :key="t.page" :href="'#/' + t.page + filterQuery" :class="{ active: route.page === t.page }" :aria-current="route.page === t.page ? 'page' : null">{{ t.label }}</a>
+        <a href="#/data" :class="{ active: route.page === 'data' }" :aria-current="route.page === 'data' ? 'page' : null">Data &amp; settings</a>
+      </nav>
+      <div class="top-actions">
+        <button v-if="fetchState.running" class="pill running" @click="go('data')" title="Fetch in progress">
+          <span class="spinner" aria-hidden="true"></span> Fetching {{ fetchState.percent.toFixed(0) }}%
+        </button>
+        <div class="theme-switch" role="radiogroup" aria-label="Colour theme">
+          <button v-for="t in themes" :key="t.key" role="radio" :aria-checked="theme === t.key" :class="{ on: theme === t.key }" :title="t.label + ' theme'" @click="setTheme(t.key)">
+            <svg viewBox="0 0 20 20" aria-hidden="true" v-html="t.icon"></svg><span class="sr-only">{{ t.label }}</span>
+          </button>
+        </div>
+      </div>
     </div>
-    <nav class="tabs" aria-label="Pages">
-      <a v-for="t in tabs" :key="t.page" :href="'#/' + t.page + filterQuery" :class="{ active: route.page === t.page }">{{ t.label }}</a>
-      <a href="#/data" :class="{ active: route.page === 'data' }">Data &amp; settings</a>
-    </nav>
   </header>
 
-  <!-- Filters: one row above every analysis page -->
-  <div class="filters" v-if="route.page !== 'data' && route.page !== 'query'">
-    <div class="presets" role="group" aria-label="Time range">
-      <button v-for="r in ranges" :key="r.key" :class="{ on: route.params.range === r.key || (!route.params.range && r.key === '7d') }" @click="setParam('range', r.key)">{{ r.label }}</button>
+  <div class="page-head" v-if="pageInfo">
+    <div class="page-head-inner">
+      <div>
+        <h1>{{ pageInfo.title }}</h1>
+        <p>{{ pageInfo.description }}</p>
+      </div>
+      <span class="data-range" v-if="hasData && filterOptions.range?.last_at && route.page !== 'data'" :title="'Stored history: ' + fmt.time(filterOptions.range.first_at) + ' → ' + fmt.time(filterOptions.range.last_at)">
+        <span class="dot" aria-hidden="true"></span>{{ fmt.int(filterOptions.range.queries) }} queries stored · latest {{ fmt.time(filterOptions.range.last_at) }}
+      </span>
     </div>
-    <label v-for="d in dims" :key="d.key" class="dim">
-      <span class="sr-only">{{ d.label }}</span>
-      <select :value="route.params[d.key] || ''" @change="setParam(d.key, $event.target.value)">
-        <option value="">All {{ d.plural }}</option>
-        <option v-for="o in (filterOptions[d.key] || [])" :key="o.value" :value="o.value">{{ o.value ?? '(none)' }} ({{ fmt.int(o.n) }})</option>
-      </select>
-    </label>
-    <button class="link" v-if="hasDimFilter" @click="clearFilters">Clear filters</button>
+  </div>
+
+  <!-- Filters: one row above every analysis page -->
+  <div class="toolbar" v-if="hasData && route.page !== 'data' && route.page !== 'query'">
+    <div class="toolbar-inner">
+      <div class="presets" role="group" aria-label="Time range">
+        <button v-for="r in ranges" :key="r.key" :class="{ on: activeRange === r.key }" :aria-pressed="activeRange === r.key" @click="setParam('range', r.key)">{{ r.label }}</button>
+      </div>
+      <label v-for="d in dims" :key="d.key" class="dim" :class="{ active: route.params[d.key] }">
+        <span class="sr-only">{{ d.label }}</span>
+        <select :value="route.params[d.key] || ''" @change="setParam(d.key, $event.target.value)">
+          <option value="">All {{ d.plural }}</option>
+          <option v-for="o in (filterOptions[d.key] || [])" :key="o.value" :value="o.value">{{ o.value ?? '(none)' }} ({{ fmt.int(o.n) }})</option>
+        </select>
+      </label>
+      <button class="link" v-if="hasDimFilter" @click="clearFilters">Clear filters</button>
+    </div>
   </div>
 
   <main>
     <section v-if="!hasData && route.page !== 'data'" class="card empty">
+      <svg viewBox="0 0 48 48" class="empty-icon" aria-hidden="true"><rect x="6" y="26" width="8" height="14" rx="2"/><rect x="20" y="18" width="8" height="22" rx="2"/><rect x="34" y="10" width="8" height="30" rx="2"/></svg>
       <h2>No query history yet</h2>
-      <p class="muted">Pull your Athena query history first, then come back here.</p>
+      <p class="muted">Pull your Athena query history first. It's stored locally in SQLite and never leaves this machine.</p>
       <a class="button primary" href="#/data">Go to Data &amp; settings</a>
     </section>
 
@@ -51,6 +84,14 @@
     <query-page v-else-if="route.page === 'query'" :id="route.id"></query-page>
     <data-page v-else-if="route.page === 'data'" @changed="loadFilterOptions"></data-page>
   </main>
+
+  <footer class="foot">
+    <span>athena-query-insights <span v-if="meta.version">v{{ meta.version }}</span></span>
+    <span aria-hidden="true">·</span>
+    <span>Data stays on this machine</span>
+    <span aria-hidden="true">·</span>
+    <a href="https://github.com/ranjithkumarmv/aws-athena-query-insights" target="_blank" rel="noopener noreferrer">GitHub</a>
+  </footer>
 </div>
 
 <!-- ───────────── shared components ───────────── -->
@@ -61,7 +102,7 @@
     <span class="value">{{ value }}</span>
     <span class="delta" v-if="delta != null && Number.isFinite(delta)" :class="deltaClass" :title="'vs previous ' + 'period: ' + previous">
       <span aria-hidden="true">{{ delta > 0 ? '▲' : delta < 0 ? '▼' : '■' }}</span>
-      {{ Math.abs(delta) < 0.1 ? 'no change' : Math.abs(delta).toFixed(Math.abs(delta) < 10 ? 1 : 0) + '%' }}
+      {{ Math.abs(delta) < 0.1 ? 'no change' : Math.abs(delta) >= 1000 ? '>999%' : Math.abs(delta).toFixed(Math.abs(delta) < 10 ? 1 : 0) + '%' }}
       <span class="muted">vs prev.</span>
     </span>
     <span class="hint" v-else-if="hint">{{ hint }}</span>
@@ -110,16 +151,20 @@
 
 <template id="tpl-loading">
   <div class="loading-bar" v-if="loading" role="status" aria-live="polite"><span></span><span class="sr-only">Loading</span></div>
-  <div class="card error" v-if="error">Couldn't load this page: {{ error }}</div>
+  <div class="card error" v-if="error" role="alert">Couldn't load this page: {{ error }}</div>
+  <div class="skeleton-page" v-if="loading && first" aria-hidden="true">
+    <div class="kpis"><div class="kpi skeleton-tile" v-for="i in 4" :key="i"><span class="sk sk-label"></span><span class="sk sk-value"></span></div></div>
+    <div class="grid-2"><div class="card" v-for="i in 2" :key="i"><span class="sk sk-label"></span><span class="sk sk-chart"></span></div></div>
+  </div>
 </template>
 
 <!-- ───────────── pages ───────────── -->
 
 <template id="tpl-overview">
   <div class="page" :class="{ stale: loading && data }">
-    <loading-state :loading="loading" :error="error"></loading-state>
+    <loading-state :loading="loading" :error="error" :first="!data"></loading-state>
     <template v-if="data">
-      <div class="kpis">
+      <div class="kpis six">
         <kpi-tile label="Queries" :value="fmt.int(k.queries)" :delta="delta('queries')" :previous="fmt.int(p?.queries)"></kpi-tile>
         <kpi-tile label="On-demand cost" :value="fmt.usd(k.cost_usd)" :delta="delta('cost_usd')" good-when="down" :previous="fmt.usd(p?.cost_usd)"></kpi-tile>
         <kpi-tile label="Data scanned" :value="fmt.bytes(k.bytes_scanned)" :delta="delta('bytes_scanned')" good-when="down" :previous="fmt.bytes(p?.bytes_scanned)"></kpi-tile>
@@ -143,7 +188,7 @@
 
 <template id="tpl-expensive">
   <div class="page" :class="{ stale: loading && data }">
-    <loading-state :loading="loading" :error="error"></loading-state>
+    <loading-state :loading="loading" :error="error" :first="!data"></loading-state>
     <template v-if="data">
       <div class="kpis">
         <kpi-tile label="On-demand cost" :value="fmt.usd(data.kpis.cost_usd)"></kpi-tile>
@@ -199,7 +244,7 @@
 
 <template id="tpl-slow">
   <div class="page" :class="{ stale: loading && data }">
-    <loading-state :loading="loading" :error="error"></loading-state>
+    <loading-state :loading="loading" :error="error" :first="!data"></loading-state>
     <template v-if="data">
       <div class="kpis">
         <kpi-tile label="Median duration" :value="fmt.ms(data.kpis.p50_ms)" hint="succeeded queries"></kpi-tile>
@@ -268,7 +313,7 @@
 
 <template id="tpl-failures">
   <div class="page" :class="{ stale: loading && data }">
-    <loading-state :loading="loading" :error="error"></loading-state>
+    <loading-state :loading="loading" :error="error" :first="!data"></loading-state>
     <template v-if="data">
       <div class="kpis">
         <kpi-tile label="Failed queries" :value="fmt.int(data.kpis.failed)"></kpi-tile>
@@ -322,7 +367,7 @@
 
 <template id="tpl-query">
   <div class="page" :class="{ stale: loading && data }">
-    <loading-state :loading="loading" :error="error"></loading-state>
+    <loading-state :loading="loading" :error="error" :first="!data"></loading-state>
     <template v-if="data">
       <section class="card">
         <div class="card-head">
