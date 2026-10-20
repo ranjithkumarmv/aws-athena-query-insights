@@ -222,6 +222,7 @@ const ChartCard = {
         points: Boolean,
         labels: { type: Array, default: () => [] },
         labelKind: { type: String, default: "text" },
+        partialLast: Boolean, // newest bucket is still in progress
         series: { type: Array, default: () => [] },
         format: { type: String, default: "int" },
     },
@@ -261,6 +262,8 @@ const ChartCard = {
             const ink = { text: cssVar("text"), muted: cssVar("axis-text"), grid: cssVar("grid"), baseline: cssVar("baseline"), card: cssVar("card"), border: cssVar("border") };
             const horizontal = this.horizontal;
             const isLine = this.type === "line";
+            const partial = this.partialLast;
+            const lastIndex = this.labels.length - 1;
             const datasets = this.series.map(s => {
                 const color = cssVar(s.color || "series-1");
                 return isLine
@@ -269,10 +272,14 @@ const ChartCard = {
                           borderWidth: 2, borderJoinStyle: "round", borderCapStyle: "round", tension: 0,
                           pointRadius: this.points && this.labels.length <= 60 ? 4 : 0, pointHoverRadius: 5, pointBorderColor: ink.card, pointBorderWidth: 2,
                           spanGaps: true,
+                          // Dashed final segment: that period isn't over yet.
+                          segment: { borderDash: ctx => (partial && ctx.p1DataIndex === lastIndex ? [4, 4] : undefined) },
                           ...(this.series.length === 1 ? { fill: "origin", backgroundColor: withAlpha(color, 0.1) } : {}),
                       }
                     : {
-                          label: s.label, data: s.data, backgroundColor: color, hoverBackgroundColor: color,
+                          label: s.label, data: s.data,
+                          backgroundColor: s.data.map((_, i) => (partial && i === lastIndex ? withAlpha(color, 0.4) : color)),
+                          hoverBackgroundColor: color,
                           maxBarThickness: 24, borderRadius: 4, borderSkipped: "start", categoryPercentage: 0.8, barPercentage: 0.9,
                       };
             });
@@ -335,7 +342,7 @@ const ChartCard = {
                             boxPadding: 4,
                             usePointStyle: true,
                             callbacks: {
-                                title: items => bucketLabel(items[0].label, kind, true),
+                                title: items => bucketLabel(items[0].label, kind, true) + (partial && items[0].dataIndex === lastIndex ? " (so far)" : ""),
                                 label: item => ` ${item.dataset.label}: ${this.fmtValue(item.raw)}`,
                             },
                         },

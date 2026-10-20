@@ -166,7 +166,9 @@ export class Analysis {
             const r = byT.get(t) ?? { queries: 0, failed: 0, cancelled: 0, billable_bytes: 0, avg_queue_ms: null, avg_engine_ms: null, avg_total_ms: null };
             buckets.push({ ...r, t, cost_usd: costOf(r.billable_bytes, price) });
         }
-        return { granularity, buckets };
+        // The newest bucket may still be filling up (today, this hour); charts mark it.
+        const lastEnd = cur - tzMs;
+        return { granularity, buckets, partialLast: buckets.length > 0 && lastEnd > Date.now() };
     }
 
     bounds(f) {

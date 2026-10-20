@@ -69,6 +69,7 @@ test("hourly buckets for short ranges, shifted to the viewer's time zone", () =>
     assert.equal(s.granularity, "hour");
     assert.equal(s.buckets[0].t, "2026-10-01T05:00"); // 00:00 UTC = 05:30 IST → bucket 05:00
     assert.equal(s.buckets.reduce((a, b) => a + b.queries, 0), 10);
+    assert.equal(s.partialLast, false, "a window in the past has no in-progress bucket");
 });
 
 test("expensive groups repeated queries by hash", () => {

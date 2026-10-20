@@ -115,6 +115,7 @@
       <div>
         <h3>{{ title }}</h3>
         <p class="muted small" v-if="subtitle">{{ subtitle }}</p>
+        <p class="faint small" v-if="partialLast && labels.length">{{ labelKind === 'hour' ? 'This hour' : 'Today' }} is still in progress, so it's shown faded</p>
       </div>
       <button class="link" @click="showTable = !showTable" :aria-pressed="showTable">{{ showTable ? 'Chart' : 'Table' }}</button>
     </div>
@@ -173,9 +174,9 @@
         <kpi-tile label="p95 duration" :value="fmt.ms(k.p95_ms)" :delta="delta('p95_ms')" good-when="down" :previous="fmt.ms(p?.p95_ms)"></kpi-tile>
       </div>
       <div class="grid-2">
-        <chart-card :title="'Cost per ' + gran" subtitle="On-demand price × billable bytes" type="bar" :labels="times" :label-kind="gran"
+        <chart-card :title="'Cost per ' + gran" subtitle="On-demand price × billable bytes" type="bar" :labels="times" :label-kind="gran" :partial-last="data.series.partialLast"
           :series="[{ label: 'Cost', data: buckets.map(b => b.cost_usd), color: 'series-1' }]" format="usd"></chart-card>
-        <chart-card :title="'Queries per ' + gran" type="line" :labels="times" :label-kind="gran"
+        <chart-card :title="'Queries per ' + gran" type="line" :labels="times" :label-kind="gran" :partial-last="data.series.partialLast"
           :series="[{ label: 'All queries', data: buckets.map(b => b.queries), color: 'series-1' }, { label: 'Failed', data: buckets.map(b => b.failed), color: 'critical' }]" format="int"></chart-card>
         <chart-card title="Cost by workgroup" type="bar" horizontal :labels="data.byWorkgroup.map(r => r.name)"
           :series="[{ label: 'Cost', data: data.byWorkgroup.map(r => r.cost_usd), color: 'series-1' }]" format="usd"></chart-card>
@@ -253,7 +254,7 @@
         <kpi-tile label="Average queue time" :value="fmt.ms(data.kpis.avg_queue_ms)" hint="waiting for capacity"></kpi-tile>
       </div>
       <div class="grid-2">
-        <chart-card :title="'Queue vs engine time per ' + gran" subtitle="Average per succeeded query" type="line" :labels="times" :label-kind="gran"
+        <chart-card :title="'Queue vs engine time per ' + gran" subtitle="Average per succeeded query" type="line" :labels="times" :label-kind="gran" :partial-last="data.series.partialLast"
           :series="[{ label: 'Engine', data: buckets.map(b => b.avg_engine_ms), color: 'series-1' }, { label: 'Queue', data: buckets.map(b => b.avg_queue_ms), color: 'series-2' }]" format="ms"></chart-card>
         <section class="card">
           <div class="card-head"><div><h3>Where the time goes</h3><p class="muted small">Total across succeeded queries</p></div></div>
@@ -321,7 +322,7 @@
         <kpi-tile label="Error patterns" :value="fmt.int(data.errors.length)" hint="ids, paths and numbers masked"></kpi-tile>
         <kpi-tile label="Cancelled" :value="fmt.int(data.kpis.cancelled)"></kpi-tile>
       </div>
-      <chart-card :title="'Failed queries per ' + gran" type="bar" :labels="times" :label-kind="gran"
+      <chart-card :title="'Failed queries per ' + gran" type="bar" :labels="times" :label-kind="gran" :partial-last="data.series.partialLast"
         :series="[{ label: 'Failed', data: buckets.map(b => b.failed), color: 'critical' }]" format="int"></chart-card>
 
       <section class="card">
