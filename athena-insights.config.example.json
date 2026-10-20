@@ -1,0 +1,12 @@
+{
+  "profile": "prod",
+  "regions": ["ca-central-1", "us-east-1"],
+  "roleArns": [],
+  "workgroups": [],
+  "states": [],
+  "days": 30,
+  "storeQueryText": true,
+  "pricePerTb": 5,
+  "dbPath": "data/athena-insights.db",
+  "port": 4567
+}

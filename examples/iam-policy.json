@@ -1,0 +1,15 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "ReadAthenaQueryHistory",
+      "Effect": "Allow",
+      "Action": [
+        "athena:ListWorkGroups",
+        "athena:ListQueryExecutions",
+        "athena:BatchGetQueryExecution"
+      ],
+      "Resource": "*"
+    }
+  ]
+}

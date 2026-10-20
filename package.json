@@ -1,0 +1,45 @@
+{
+  "name": "athena-query-insights",
+  "version": "0.1.0",
+  "description": "Pull Amazon Athena query history into SQLite and see query-level cost, performance and failures in your browser. No infrastructure.",
+  "type": "module",
+  "license": "MIT",
+  "author": "ranjithkumarmv",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ranjithkumarmv/aws-athena-query-insights.git"
+  },
+  "homepage": "https://github.com/ranjithkumarmv/aws-athena-query-insights#readme",
+  "bugs": "https://github.com/ranjithkumarmv/aws-athena-query-insights/issues",
+  "bin": {
+    "athena-query-insights": "bin/cli.js"
+  },
+  "files": [
+    "bin",
+    "src",
+    "web"
+  ],
+  "engines": {
+    "node": ">=22.13"
+  },
+  "scripts": {
+    "start": "node bin/cli.js serve",
+    "fetch": "node bin/cli.js fetch",
+    "test": "node --test --disable-warning=ExperimentalWarning \"test/**/*.test.js\""
+  },
+  "keywords": [
+    "aws",
+    "athena",
+    "observability",
+    "cost",
+    "query-history",
+    "sqlite"
+  ],
+  "dependencies": {
+    "@aws-sdk/client-athena": "^3.750.0",
+    "@aws-sdk/client-sts": "^3.750.0",
+    "@aws-sdk/credential-providers": "^3.750.0",
+    "chart.js": "^4.4.7",
+    "vue": "^3.4.38"
+  }
+}

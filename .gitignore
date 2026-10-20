@@ -1,0 +1,8 @@
+node_modules/
+*.db
+*.db-shm
+*.db-wal
+athena-insights.config.json
+.env
+*.zip
+.claude/launch.json

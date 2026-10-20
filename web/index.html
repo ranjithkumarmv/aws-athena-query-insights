@@ -1,0 +1,568 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Athena Query Insights</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 16 16%22%3E%3Crect x=%221%22 y=%228%22 width=%223%22 height=%227%22 fill=%22%232a78d6%22/%3E%3Crect x=%226%22 y=%224%22 width=%223%22 height=%2211%22 fill=%22%232a78d6%22/%3E%3Crect x=%2211%22 y=%221%22 width=%223%22 height=%2214%22 fill=%22%232a78d6%22/%3E%3C/svg%3E">
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<div id="app" v-cloak>
+  <header class="top">
+    <div class="brand">
+      <h1><a href="#/overview">Athena Query Insights</a></h1>
+      <span v-if="fetchState.running" class="pill running" @click="go('data')">
+        <span class="spinner" aria-hidden="true"></span> Fetching {{ fetchState.percent.toFixed(0) }}%
+      </span>
+    </div>
+    <nav class="tabs" aria-label="Pages">
+      <a v-for="t in tabs" :key="t.page" :href="'#/' + t.page + filterQuery" :class="{ active: route.page === t.page }">{{ t.label }}</a>
+      <a href="#/data" :class="{ active: route.page === 'data' }">Data &amp; settings</a>
+    </nav>
+  </header>
+
+  <!-- Filters: one row above every analysis page -->
+  <div class="filters" v-if="route.page !== 'data' && route.page !== 'query'">
+    <div class="presets" role="group" aria-label="Time range">
+      <button v-for="r in ranges" :key="r.key" :class="{ on: route.params.range === r.key || (!route.params.range && r.key === '7d') }" @click="setParam('range', r.key)">{{ r.label }}</button>
+    </div>
+    <label v-for="d in dims" :key="d.key" class="dim">
+      <span class="sr-only">{{ d.label }}</span>
+      <select :value="route.params[d.key] || ''" @change="setParam(d.key, $event.target.value)">
+        <option value="">All {{ d.plural }}</option>
+        <option v-for="o in (filterOptions[d.key] || [])" :key="o.value" :value="o.value">{{ o.value ?? '(none)' }} ({{ fmt.int(o.n) }})</option>
+      </select>
+    </label>
+    <button class="link" v-if="hasDimFilter" @click="clearFilters">Clear filters</button>
+  </div>
+
+  <main>
+    <section v-if="!hasData && route.page !== 'data'" class="card empty">
+      <h2>No query history yet</h2>
+      <p class="muted">Pull your Athena query history first, then come back here.</p>
+      <a class="button primary" href="#/data">Go to Data &amp; settings</a>
+    </section>
+
+    <overview-page v-else-if="route.page === 'overview'" :query="apiQuery"></overview-page>
+    <expensive-page v-else-if="route.page === 'expensive'" :query="apiQuery"></expensive-page>
+    <slow-page v-else-if="route.page === 'slow'" :query="apiQuery"></slow-page>
+    <failures-page v-else-if="route.page === 'failures'" :query="apiQuery"></failures-page>
+    <query-page v-else-if="route.page === 'query'" :id="route.id"></query-page>
+    <data-page v-else-if="route.page === 'data'" @changed="loadFilterOptions"></data-page>
+  </main>
+</div>
+
+<!-- ───────────── shared components ───────────── -->
+
+<template id="tpl-kpi">
+  <div class="kpi">
+    <span class="label">{{ label }}</span>
+    <span class="value">{{ value }}</span>
+    <span class="delta" v-if="delta != null && Number.isFinite(delta)" :class="deltaClass" :title="'vs previous ' + 'period: ' + previous">
+      <span aria-hidden="true">{{ delta > 0 ? '▲' : delta < 0 ? '▼' : '■' }}</span>
+      {{ Math.abs(delta) < 0.1 ? 'no change' : Math.abs(delta).toFixed(Math.abs(delta) < 10 ? 1 : 0) + '%' }}
+      <span class="muted">vs prev.</span>
+    </span>
+    <span class="hint" v-else-if="hint">{{ hint }}</span>
+  </div>
+</template>
+
+<template id="tpl-chart">
+  <div class="card chart-card">
+    <div class="card-head">
+      <div>
+        <h3>{{ title }}</h3>
+        <p class="muted small" v-if="subtitle">{{ subtitle }}</p>
+      </div>
+      <button class="link" @click="showTable = !showTable" :aria-pressed="showTable">{{ showTable ? 'Chart' : 'Table' }}</button>
+    </div>
+    <div v-if="!labels.length" class="chart-empty muted">No data for these filters</div>
+    <div v-else-if="showTable" class="table-wrap chart-table">
+      <table>
+        <thead><tr><th>{{ horizontal ? 'Name' : 'Time' }}</th><th class="num" v-for="s in series" :key="s.label">{{ s.label }}</th></tr></thead>
+        <tbody><tr v-for="(l, i) in labels" :key="i"><td>{{ labelText(l) }}</td><td class="num" v-for="s in series" :key="s.label">{{ fmtValue(s.data[i]) }}</td></tr></tbody>
+      </table>
+    </div>
+    <div v-show="labels.length && !showTable" class="chart-box" :style="{ height: boxHeight + 'px' }">
+      <canvas ref="canvas" role="img" :aria-label="title"></canvas>
+    </div>
+  </div>
+</template>
+
+<template id="tpl-sql">
+  <span class="sql" :title="text || ''">
+    <template v-if="text">{{ text }}</template>
+    <span v-else class="muted">(SQL text not stored) · {{ hash }}</span>
+  </span>
+</template>
+
+<template id="tpl-phases">
+  <div class="phases">
+    <div class="phase" v-for="p in rows" :key="p.key">
+      <span class="phase-name">{{ p.label }}</span>
+      <span class="phase-track"><span class="phase-fill" :style="{ width: p.pct + '%' }"></span></span>
+      <span class="phase-val num">{{ fmt.ms(p.ms) }} <span class="muted">· {{ p.pct.toFixed(0) }}%</span></span>
+    </div>
+    <p v-if="!rows.length" class="muted small">No timing data.</p>
+  </div>
+</template>
+
+<template id="tpl-loading">
+  <div class="loading-bar" v-if="loading" role="status" aria-live="polite"><span></span><span class="sr-only">Loading</span></div>
+  <div class="card error" v-if="error">Couldn't load this page: {{ error }}</div>
+</template>
+
+<!-- ───────────── pages ───────────── -->
+
+<template id="tpl-overview">
+  <div class="page" :class="{ stale: loading && data }">
+    <loading-state :loading="loading" :error="error"></loading-state>
+    <template v-if="data">
+      <div class="kpis">
+        <kpi-tile label="Queries" :value="fmt.int(k.queries)" :delta="delta('queries')" :previous="fmt.int(p?.queries)"></kpi-tile>
+        <kpi-tile label="On-demand cost" :value="fmt.usd(k.cost_usd)" :delta="delta('cost_usd')" good-when="down" :previous="fmt.usd(p?.cost_usd)"></kpi-tile>
+        <kpi-tile label="Data scanned" :value="fmt.bytes(k.bytes_scanned)" :delta="delta('bytes_scanned')" good-when="down" :previous="fmt.bytes(p?.bytes_scanned)"></kpi-tile>
+        <kpi-tile label="Failure rate" :value="fmt.pct(k.fail_pct)" :delta="delta('fail_pct')" good-when="down" :previous="fmt.pct(p?.fail_pct)" :hint="fmt.int(k.failed) + ' failed'"></kpi-tile>
+        <kpi-tile label="Median duration" :value="fmt.ms(k.p50_ms)" :delta="delta('p50_ms')" good-when="down" :previous="fmt.ms(p?.p50_ms)"></kpi-tile>
+        <kpi-tile label="p95 duration" :value="fmt.ms(k.p95_ms)" :delta="delta('p95_ms')" good-when="down" :previous="fmt.ms(p?.p95_ms)"></kpi-tile>
+      </div>
+      <div class="grid-2">
+        <chart-card :title="'Cost per ' + gran" subtitle="On-demand price × billable bytes" type="bar" :labels="times" :label-kind="gran"
+          :series="[{ label: 'Cost', data: buckets.map(b => b.cost_usd), color: 'series-1' }]" format="usd"></chart-card>
+        <chart-card :title="'Queries per ' + gran" type="line" :labels="times" :label-kind="gran"
+          :series="[{ label: 'All queries', data: buckets.map(b => b.queries), color: 'series-1' }, { label: 'Failed', data: buckets.map(b => b.failed), color: 'critical' }]" format="int"></chart-card>
+        <chart-card title="Cost by workgroup" type="bar" horizontal :labels="data.byWorkgroup.map(r => r.name)"
+          :series="[{ label: 'Cost', data: data.byWorkgroup.map(r => r.cost_usd), color: 'series-1' }]" format="usd"></chart-card>
+        <chart-card title="Cost by database" subtitle="Database the query ran in (its context), not every table it touched" type="bar" horizontal :labels="data.byDatabase.map(r => r.name)"
+          :series="[{ label: 'Cost', data: data.byDatabase.map(r => r.cost_usd), color: 'series-1' }]" format="usd"></chart-card>
+      </div>
+    </template>
+  </div>
+</template>
+
+<template id="tpl-expensive">
+  <div class="page" :class="{ stale: loading && data }">
+    <loading-state :loading="loading" :error="error"></loading-state>
+    <template v-if="data">
+      <div class="kpis">
+        <kpi-tile label="On-demand cost" :value="fmt.usd(data.kpis.cost_usd)"></kpi-tile>
+        <kpi-tile label="Data scanned" :value="fmt.bytes(data.kpis.bytes_scanned)"></kpi-tile>
+        <kpi-tile label="Distinct queries" :value="fmt.int(data.kpis.distinct_queries)" hint="after removing literals"></kpi-tile>
+        <kpi-tile label="Reused results" :value="fmt.int(data.kpis.reused)" hint="served from the result cache, free"></kpi-tile>
+      </div>
+
+      <section class="card">
+        <div class="card-head"><div><h3>Most expensive repeated queries</h3>
+          <p class="muted small">Same SQL with different literals counts as one query. Total cost across all runs.</p></div></div>
+        <div class="table-wrap">
+          <table class="clickable">
+            <thead><tr><th class="num">Total cost</th><th class="num">Runs</th><th class="num">Avg scanned</th><th class="num">Avg duration</th><th>Database</th><th>Last run</th><th>Query</th></tr></thead>
+            <tbody>
+              <tr v-for="r in data.repeated" :key="r.query_hash" @click="open(r.sample_id)" tabindex="0" @keydown.enter="open(r.sample_id)">
+                <td class="num">{{ fmt.usd(r.total_cost_usd) }}</td><td class="num">{{ fmt.int(r.runs) }}</td>
+                <td class="num">{{ fmt.bytes(r.avg_bytes) }}</td><td class="num">{{ fmt.ms(r.avg_ms) }}</td>
+                <td>{{ r.database ?? '(none)' }}</td><td>{{ fmt.time(r.last_at) }}</td>
+                <td><sql-text :text="r.query_text" :hash="r.query_hash"></sql-text></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <div class="grid-2">
+        <chart-card title="Queries by data scanned" subtitle="Succeeded queries. Under 10 MB is still billed as 10 MB." type="bar" :labels="data.scanBuckets.map(b => b.label)"
+          :series="[{ label: 'Queries', data: data.scanBuckets.map(b => b.queries), color: 'series-1' }]" format="int"></chart-card>
+        <chart-card title="Cost by database" type="bar" horizontal :labels="data.byDatabase.map(r => r.name)"
+          :series="[{ label: 'Cost', data: data.byDatabase.map(r => r.cost_usd), color: 'series-1' }]" format="usd"></chart-card>
+      </div>
+
+      <section class="card">
+        <div class="card-head"><h3>Most expensive single runs</h3></div>
+        <div class="table-wrap">
+          <table class="clickable">
+            <thead><tr><th class="num">Cost</th><th class="num">Scanned</th><th class="num">Duration</th><th>Workgroup</th><th>Database</th><th>Submitted</th><th>Query</th></tr></thead>
+            <tbody>
+              <tr v-for="r in data.top" :key="r.query_execution_id" @click="open(r.query_execution_id)" tabindex="0" @keydown.enter="open(r.query_execution_id)">
+                <td class="num">{{ fmt.usd(r.cost_usd) }}</td><td class="num">{{ fmt.bytes(r.bytes_scanned) }}</td><td class="num">{{ fmt.ms(r.total_ms) }}</td>
+                <td>{{ r.workgroup }}</td><td>{{ r.database ?? '(none)' }}</td><td>{{ fmt.time(r.submitted_at) }}</td>
+                <td><sql-text :text="r.query_text" :hash="r.query_hash"></sql-text></td>
+              </tr>
+            </tbody>
+          </table>
+          <p v-if="!data.top.length" class="muted">No billed queries for these filters.</p>
+        </div>
+      </section>
+    </template>
+  </div>
+</template>
+
+<template id="tpl-slow">
+  <div class="page" :class="{ stale: loading && data }">
+    <loading-state :loading="loading" :error="error"></loading-state>
+    <template v-if="data">
+      <div class="kpis">
+        <kpi-tile label="Median duration" :value="fmt.ms(data.kpis.p50_ms)" hint="succeeded queries"></kpi-tile>
+        <kpi-tile label="p95 duration" :value="fmt.ms(data.kpis.p95_ms)"></kpi-tile>
+        <kpi-tile label="Average duration" :value="fmt.ms(data.kpis.avg_ms)"></kpi-tile>
+        <kpi-tile label="Average queue time" :value="fmt.ms(data.kpis.avg_queue_ms)" hint="waiting for capacity"></kpi-tile>
+      </div>
+      <div class="grid-2">
+        <chart-card :title="'Queue vs engine time per ' + gran" subtitle="Average per succeeded query" type="line" :labels="times" :label-kind="gran"
+          :series="[{ label: 'Engine', data: buckets.map(b => b.avg_engine_ms), color: 'series-1' }, { label: 'Queue', data: buckets.map(b => b.avg_queue_ms), color: 'series-2' }]" format="ms"></chart-card>
+        <section class="card">
+          <div class="card-head"><div><h3>Where the time goes</h3><p class="muted small">Total across succeeded queries</p></div></div>
+          <phase-bars :phases="data.phases"></phase-bars>
+        </section>
+      </div>
+
+      <section class="card">
+        <div class="card-head"><h3>Duration by database</h3></div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Database</th><th class="num">Queries</th><th class="num">Median</th><th class="num">p95</th><th class="num">Max</th><th class="num">Avg queue</th></tr></thead>
+            <tbody>
+              <tr v-for="r in data.perDatabase" :key="r.name">
+                <td><a :href="'#/slow?' + withParam('database', r.name)">{{ r.name }}</a></td><td class="num">{{ fmt.int(r.queries) }}</td>
+                <td class="num">{{ fmt.ms(r.p50_ms) }}</td><td class="num">{{ fmt.ms(r.p95_ms) }}</td><td class="num">{{ fmt.ms(r.max_ms) }}</td><td class="num">{{ fmt.ms(r.avg_queue_ms) }}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="card">
+        <div class="card-head"><div><h3>Queries using the most total time</h3><p class="muted small">Average duration × runs: what to optimise first</p></div></div>
+        <div class="table-wrap">
+          <table class="clickable">
+            <thead><tr><th class="num">Total time</th><th class="num">Runs</th><th class="num">Avg</th><th class="num">Max</th><th>Database</th><th>Query</th></tr></thead>
+            <tbody>
+              <tr v-for="r in data.repeated" :key="r.query_hash" @click="open(r.sample_id)" tabindex="0" @keydown.enter="open(r.sample_id)">
+                <td class="num">{{ fmt.ms((r.avg_ms ?? 0) * r.runs) }}</td><td class="num">{{ fmt.int(r.runs) }}</td>
+                <td class="num">{{ fmt.ms(r.avg_ms) }}</td><td class="num">{{ fmt.ms(r.max_ms) }}</td>
+                <td>{{ r.database ?? '(none)' }}</td><td><sql-text :text="r.query_text" :hash="r.query_hash"></sql-text></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="card">
+        <div class="card-head"><h3>Slowest single runs</h3></div>
+        <div class="table-wrap">
+          <table class="clickable">
+            <thead><tr><th class="num">Duration</th><th class="num">Queue</th><th class="num">Engine</th><th class="num">Scanned</th><th>Workgroup</th><th>Database</th><th>Submitted</th><th>Query</th></tr></thead>
+            <tbody>
+              <tr v-for="r in data.top" :key="r.query_execution_id" @click="open(r.query_execution_id)" tabindex="0" @keydown.enter="open(r.query_execution_id)">
+                <td class="num">{{ fmt.ms(r.total_ms) }}</td><td class="num">{{ fmt.ms(r.queue_ms) }}</td><td class="num">{{ fmt.ms(r.engine_ms) }}</td>
+                <td class="num">{{ fmt.bytes(r.bytes_scanned) }}</td><td>{{ r.workgroup }}</td><td>{{ r.database ?? '(none)' }}</td>
+                <td>{{ fmt.time(r.submitted_at) }}</td><td><sql-text :text="r.query_text" :hash="r.query_hash"></sql-text></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </template>
+  </div>
+</template>
+
+<template id="tpl-failures">
+  <div class="page" :class="{ stale: loading && data }">
+    <loading-state :loading="loading" :error="error"></loading-state>
+    <template v-if="data">
+      <div class="kpis">
+        <kpi-tile label="Failed queries" :value="fmt.int(data.kpis.failed)"></kpi-tile>
+        <kpi-tile label="Failure rate" :value="fmt.pct(data.kpis.fail_pct)" hint="of finished queries"></kpi-tile>
+        <kpi-tile label="Error patterns" :value="fmt.int(data.errors.length)" hint="ids, paths and numbers masked"></kpi-tile>
+        <kpi-tile label="Cancelled" :value="fmt.int(data.kpis.cancelled)"></kpi-tile>
+      </div>
+      <chart-card :title="'Failed queries per ' + gran" type="bar" :labels="times" :label-kind="gran"
+        :series="[{ label: 'Failed', data: buckets.map(b => b.failed), color: 'critical' }]" format="int"></chart-card>
+
+      <section class="card">
+        <div class="card-head"><div><h3>Errors, grouped</h3><p class="muted small">Click a row to open the latest query with that error</p></div></div>
+        <div class="table-wrap">
+          <table class="clickable">
+            <thead><tr><th class="num">Count</th><th>Error</th><th>Category</th><th>Retryable</th><th>Databases</th><th>Last seen</th></tr></thead>
+            <tbody>
+              <tr v-for="e in data.errors" :key="e.error_type + e.pattern" @click="open(e.sample_id)" tabindex="0" @keydown.enter="open(e.sample_id)">
+                <td class="num">{{ fmt.int(e.count) }}</td>
+                <td class="wrap" :title="e.sample_message">{{ e.pattern }}</td>
+                <td>{{ e.error_category ?? '–' }}<span class="muted" v-if="e.error_type"> · {{ e.error_type }}</span></td>
+                <td>{{ e.retryable == null ? '–' : e.retryable ? 'yes' : 'no' }}</td>
+                <td>{{ e.databases.join(', ') }}<span class="muted" v-if="e.database_count > e.databases.length"> +{{ e.database_count - e.databases.length }}</span></td>
+                <td>{{ fmt.time(e.last_at) }}</td>
+              </tr>
+            </tbody>
+          </table>
+          <p v-if="!data.errors.length" class="muted">No failures for these filters.</p>
+        </div>
+      </section>
+
+      <div class="grid-2">
+        <section class="card" v-for="t in [{ title: 'Failure rate by database', rows: data.byDatabase, key: 'database' }, { title: 'Failure rate by workgroup', rows: data.byWorkgroup, key: 'workgroup' }]" :key="t.key">
+          <div class="card-head"><h3>{{ t.title }}</h3></div>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>{{ t.key === 'database' ? 'Database' : 'Workgroup' }}</th><th class="num">Failed</th><th class="num">Finished</th><th class="num">Rate</th></tr></thead>
+              <tbody>
+                <tr v-for="r in t.rows" :key="r.name">
+                  <td><a :href="'#/failures?' + withParam(t.key, r.name)">{{ r.name }}</a></td>
+                  <td class="num">{{ fmt.int(r.failed) }}</td><td class="num">{{ fmt.int(r.queries) }}</td><td class="num">{{ fmt.pct(r.fail_pct) }}</td>
+                </tr>
+              </tbody>
+            </table>
+            <p v-if="!t.rows.length" class="muted">None.</p>
+          </div>
+        </section>
+      </div>
+    </template>
+  </div>
+</template>
+
+<template id="tpl-query">
+  <div class="page" :class="{ stale: loading && data }">
+    <loading-state :loading="loading" :error="error"></loading-state>
+    <template v-if="data">
+      <section class="card">
+        <div class="card-head">
+          <div>
+            <p class="small muted"><a href="#/overview" @click.prevent="back">← Back</a></p>
+            <h2 class="mono">{{ q.query_execution_id }}</h2>
+            <p class="muted small">
+              <span class="state" :class="q.state?.toLowerCase()">{{ stateIcon(q.state) }} {{ q.state }}</span> ·
+              {{ q.workgroup }} · {{ q.database ?? '(no database)' }} · {{ q.account_id }} / {{ q.region }} ·
+              submitted {{ fmt.time(q.submitted_at) }}<span v-if="q.engine_version"> · {{ q.engine_version }}</span>
+            </p>
+          </div>
+          <a class="button" :href="consoleUrl" target="_blank" rel="noopener noreferrer">Open in Athena console ↗</a>
+        </div>
+        <div class="kpis">
+          <kpi-tile label="Duration" :value="fmt.ms(q.total_ms)"></kpi-tile>
+          <kpi-tile label="On-demand cost" :value="fmt.usd(q.cost_usd)" :hint="q.result_reused ? 'reused result, free' : ''"></kpi-tile>
+          <kpi-tile label="Data scanned" :value="fmt.bytes(q.bytes_scanned)" :hint="'billed ' + fmt.bytes(q.billable_bytes)"></kpi-tile>
+          <kpi-tile label="Queue time" :value="fmt.ms(q.queue_ms)"></kpi-tile>
+        </div>
+        <div class="callout bad" v-if="q.error_message || q.state_change_reason" role="alert">
+          <b>{{ stateIcon('FAILED') }} {{ [q.error_category ?? 'Error', q.error_type, q.retryable ? 'retryable' : null].filter(Boolean).join(' · ') }}</b>
+          <div>{{ q.error_message || q.state_change_reason }}</div>
+        </div>
+      </section>
+
+      <div class="grid-2">
+        <section class="card">
+          <div class="card-head"><h3>Timeline</h3></div>
+          <phase-bars :phases="q"></phase-bars>
+        </section>
+        <section class="card" v-if="data.summary">
+          <div class="card-head"><div><h3>This query over time</h3><p class="muted small">All stored runs with the same SQL shape</p></div></div>
+          <div class="kpis compact">
+            <kpi-tile label="Runs" :value="fmt.int(data.summary.runs)"></kpi-tile>
+            <kpi-tile label="Total cost" :value="fmt.usd(data.summary.cost_usd)"></kpi-tile>
+            <kpi-tile label="Avg duration" :value="fmt.ms(data.summary.avg_ms)"></kpi-tile>
+            <kpi-tile label="Failed" :value="fmt.int(data.summary.failed)"></kpi-tile>
+          </div>
+        </section>
+      </div>
+
+      <section class="card">
+        <div class="card-head">
+          <h3>SQL</h3>
+          <button class="link" v-if="q.query_text" @click="copy">{{ copied ? 'Copied' : 'Copy' }}</button>
+        </div>
+        <pre class="sql-block" v-if="q.query_text">{{ q.query_text }}</pre>
+        <p v-else class="muted">SQL text wasn't stored (store-query-text is off). Hash: <span class="mono">{{ q.query_hash }}</span></p>
+      </section>
+
+      <chart-card v-if="data.runs.length > 1" title="Duration of each run" subtitle="Oldest to newest" type="line" points
+        :labels="runsAsc.map(r => r.submitted_at)" label-kind="instant"
+        :series="[{ label: 'Duration', data: runsAsc.map(r => r.total_ms), color: 'series-1' }]" format="ms"></chart-card>
+
+      <section class="card" v-if="data.runs.length > 1">
+        <div class="card-head"><h3>Runs ({{ fmt.int(data.runs.length) }}<span v-if="data.summary.runs > data.runs.length"> of {{ fmt.int(data.summary.runs) }}</span>)</h3></div>
+        <div class="table-wrap">
+          <table class="clickable">
+            <thead><tr><th>Submitted</th><th>State</th><th class="num">Duration</th><th class="num">Queue</th><th class="num">Scanned</th><th class="num">Cost</th><th>Workgroup</th><th>Id</th></tr></thead>
+            <tbody>
+              <tr v-for="r in data.runs" :key="r.query_execution_id" :class="{ current: r.query_execution_id === q.query_execution_id }" @click="open(r.query_execution_id)" tabindex="0" @keydown.enter="open(r.query_execution_id)">
+                <td>{{ fmt.time(r.submitted_at) }}</td>
+                <td><span class="state" :class="r.state?.toLowerCase()">{{ stateIcon(r.state) }} {{ r.state }}</span></td>
+                <td class="num">{{ fmt.ms(r.total_ms) }}</td><td class="num">{{ fmt.ms(r.queue_ms) }}</td><td class="num">{{ fmt.bytes(r.bytes_scanned) }}</td>
+                <td class="num">{{ fmt.usd(r.cost_usd) }}</td><td>{{ r.workgroup }}</td><td class="mono small">{{ r.query_execution_id }}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </template>
+  </div>
+</template>
+
+<template id="tpl-data">
+  <div class="page">
+    <!-- Fetch -->
+    <section class="card">
+      <div class="card-head">
+        <h2>Fetch query history</h2>
+        <div class="row gap">
+          <button v-if="!running" class="primary" :disabled="busy" @click="startFetch">Fetch now</button>
+          <button v-else class="danger" @click="cancelFetch">Cancel</button>
+        </div>
+      </div>
+      <p class="muted small" v-if="!running">
+        {{ config.values?.days }} day(s) ·
+        {{ list(config.values?.regions, 'default region') }} ·
+        workgroups: {{ list(config.values?.workgroups, 'all') }} ·
+        states: {{ list(config.values?.states, 'all') }}
+        <span v-if="config.values?.roleArns?.length"> · {{ config.values.roleArns.length }} role(s)</span>
+      </p>
+
+      <div v-if="running || lastEnd" class="progress-block">
+        <div class="bar" :class="{ done: !running }" role="progressbar" :aria-valuenow="percent" aria-valuemin="0" aria-valuemax="100">
+          <div class="fill" :style="{ width: percent + '%' }"></div>
+        </div>
+        <div class="row between small">
+          <span v-if="running">
+            {{ progress?.unit ? `Workgroup ${progress.unit.index}/${progress.unit.total}: ${progress.unit.accountId} / ${progress.unit.region} / ${progress.unit.workgroup}` : 'Discovering accounts and workgroups…' }}
+          </span>
+          <span v-else :class="lastEnd.status.startsWith('completed') ? 'ok' : 'bad'">
+            {{ statusLabel(lastEnd.status) }}{{ lastEnd.error ? ': ' + lastEnd.error : '' }}
+          </span>
+          <span>{{ percent.toFixed(0) }}%</span>
+        </div>
+        <div class="stats small" v-if="pstats">
+          <span><b>{{ fmt.int(pstats.listed) }}</b> listed</span>
+          <span><b>{{ fmt.int(pstats.inserted) }}</b> new</span>
+          <span><b>{{ fmt.int(pstats.updated) }}</b> refreshed</span>
+          <span><b>{{ fmt.int(pstats.skipped) }}</b> already stored</span>
+          <span><b>{{ fmt.int(pstats.pages) }}</b> pages</span>
+        </div>
+        <ul class="log small" v-if="log.length">
+          <li v-for="(l, i) in log" :key="i" :class="l.type">{{ l.message }}</li>
+        </ul>
+      </div>
+    </section>
+
+    <!-- Data in store -->
+    <section class="card">
+      <div class="card-head"><h2>Stored data</h2><span class="muted small">db: {{ status.dbPath }}</span></div>
+      <div class="kpis">
+        <kpi-tile label="Queries" :value="fmt.int(inv.totals?.queries)"></kpi-tile>
+        <kpi-tile label="Failed" :value="fmt.int(inv.totals?.failed)"></kpi-tile>
+        <kpi-tile label="On-demand cost" :value="fmt.usd(inv.totals?.cost_usd)"></kpi-tile>
+        <kpi-tile label="Range" :value="range(inv.totals)" class="small-value"></kpi-tile>
+      </div>
+      <div class="table-wrap" v-if="inv.scopes?.length">
+        <table>
+          <thead><tr><th>Account</th><th>Region</th><th>Workgroup</th><th class="num">Queries</th><th class="num">Failed</th><th class="num">Cost</th><th>From</th><th>To</th></tr></thead>
+          <tbody>
+            <tr v-for="s in inv.scopes" :key="s.account_id + s.region + s.workgroup">
+              <td>{{ s.account_id }}</td><td>{{ s.region }}</td><td>{{ s.workgroup }}</td>
+              <td class="num">{{ fmt.int(s.queries) }}</td><td class="num">{{ fmt.int(s.failed) }}</td><td class="num">{{ fmt.usd(s.cost_usd) }}</td>
+              <td>{{ fmt.time(s.first_at) }}</td><td>{{ fmt.time(s.last_at) }}</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <p v-else class="muted">Nothing stored yet. Check the settings below, then press <b>Fetch now</b>.</p>
+    </section>
+
+    <!-- Settings -->
+    <section class="card">
+      <div class="card-head">
+        <h2>Settings</h2>
+        <span class="muted small">config file: {{ config.configFile || 'none' }}</span>
+      </div>
+      <p class="muted small">Saved here, in the SQLite file. Fields set by an environment variable or CLI flag are read-only.
+        AWS credentials always come from the standard AWS chain, never from this form.</p>
+
+      <form class="settings" @submit.prevent="saveSettings">
+        <label>
+          <span class="lbl">AWS profile <src-badge :s="src('profile')"></src-badge></span>
+          <select v-model="form.profile" :disabled="isLocked('profile')">
+            <option :value="''">(default credential chain)</option>
+            <option v-for="p in profiles" :key="p" :value="p">{{ p }}</option>
+            <option v-if="form.profile && !profiles.includes(form.profile)" :value="form.profile">{{ form.profile }}</option>
+          </select>
+        </label>
+
+        <label>
+          <span class="lbl">Regions <src-badge :s="src('regions')"></src-badge></span>
+          <input v-model="form.regions" :disabled="isLocked('regions')" placeholder="e.g. us-east-1, ca-central-1 (empty = profile region)">
+        </label>
+
+        <label class="wide">
+          <span class="lbl">Workgroups <src-badge :s="src('workgroups')"></src-badge>
+            <button type="button" class="link" @click="loadWorkgroups" :disabled="isLocked('workgroups') || wgLoading">{{ wgLoading ? 'loading…' : 'load from AWS' }}</button>
+          </span>
+          <input v-model="form.workgroups" :disabled="isLocked('workgroups')" placeholder="empty = all workgroups">
+          <span class="chips" v-if="wgOptions.length">
+            <button type="button" v-for="w in wgOptions" :key="w.name" class="chip" :class="{ on: wgSelected(w.name) }" @click="toggleWg(w.name)" :disabled="isLocked('workgroups')">
+              {{ w.name }}<span v-if="w.state === 'DISABLED'" class="muted"> (disabled)</span>
+            </button>
+          </span>
+          <span class="err small" v-if="wgError">{{ wgError }}</span>
+        </label>
+
+        <label>
+          <span class="lbl">Days of history <src-badge :s="src('days')"></src-badge></span>
+          <input type="number" min="1" :max="config.options?.maxDays" v-model.number="form.days" :disabled="isLocked('days')">
+        </label>
+
+        <label>
+          <span class="lbl">Price per TB scanned (USD) <src-badge :s="src('pricePerTb')"></src-badge></span>
+          <input type="number" min="0" step="0.01" v-model.number="form.pricePerTb" :disabled="isLocked('pricePerTb')">
+        </label>
+
+        <fieldset class="wide">
+          <legend class="lbl">Query states <src-badge :s="src('states')"></src-badge> <span class="muted small">(none ticked = all)</span></legend>
+          <label class="check" v-for="s in config.options?.states" :key="s">
+            <input type="checkbox" :value="s" v-model="form.states" :disabled="isLocked('states')"> {{ s }}
+          </label>
+        </fieldset>
+
+        <label class="wide">
+          <span class="lbl">Assume roles in other accounts <src-badge :s="src('roleArns')"></src-badge></span>
+          <textarea rows="2" v-model="form.roleArns" :disabled="isLocked('roleArns')" placeholder="one role ARN per line (empty = just the profile's own account)"></textarea>
+        </label>
+
+        <label class="check wide">
+          <input type="checkbox" v-model="form.storeQueryText" :disabled="isLocked('storeQueryText')">
+          Store SQL text <src-badge :s="src('storeQueryText')"></src-badge>
+          <span class="muted small">— off keeps only a hash of each query, for privacy</span>
+        </label>
+
+        <div class="row gap wide">
+          <button class="primary" :disabled="busy || running">Save settings</button>
+          <span class="ok small" v-if="savedMsg">{{ savedMsg }}</span>
+          <span class="err small" v-if="saveError">{{ saveError }}</span>
+        </div>
+      </form>
+    </section>
+
+    <!-- Runs -->
+    <section class="card" v-if="status.runs?.length">
+      <div class="card-head"><h2>Recent fetches</h2></div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>#</th><th>Started</th><th>Status</th><th class="num">Days</th><th class="num">Listed</th><th class="num">New</th><th class="num">Refreshed</th><th>Notes</th></tr></thead>
+          <tbody>
+            <tr v-for="r in status.runs" :key="r.id">
+              <td>{{ r.id }}</td><td>{{ fmt.time(r.started_at) }}</td>
+              <td :class="r.status.startsWith('completed') ? 'ok' : (r.status === 'running' ? '' : 'bad')">{{ statusLabel(r.status) }}</td>
+              <td class="num">{{ r.params.days }}</td>
+              <td class="num">{{ fmt.int(r.stats?.listed) }}</td><td class="num">{{ fmt.int(r.stats?.inserted) }}</td><td class="num">{{ fmt.int(r.stats?.updated) }}</td>
+              <td class="small">{{ r.error || (r.stats?.warnings?.length ? r.stats.warnings.length + ' warning(s): ' + r.stats.warnings[0].message : '') }}</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+  </div>
+</template>
+
+<script src="/vendor/vue.js"></script>
+<script src="/vendor/chart.js"></script>
+<script src="/app.js"></script>
+</body>
+</html>
